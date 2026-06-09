@@ -390,3 +390,88 @@ print(f"Transformaciones registradas en el log: {len(transformations)}")
 print("\nMuestra del dataset limpio:")
 df_clean.head()
 
+"""* ============================================
+# BLOQUE 5: GUARDAR DATASET LIMPIO
+* ============================================
+* Guardamos el resultado del Agente 1 para el Agente 2
+"""
+
+# Guardar en Google Drive
+save_path = '/content/drive/MyDrive/steam_agents_project/steam_games_clean.parquet'
+normalizer.save_clean_data(save_path)
+
+# También guardar una versión CSV para inspección manual
+csv_path = '/content/drive/MyDrive/steam_agents_project/steam_games_clean.csv'
+df_clean.to_csv(csv_path, index=False)
+
+print("="*60)
+print("DATASET LIMPIO GUARDADO")
+print("="*60)
+print(f"Ubicación: {save_path}")
+print(f"CSV: {csv_path}")
+
+# Estadísticas finales
+print("\nESTADÍSTICAS FINALES:")
+print(f"   - Filas: {len(df_clean):,}")
+print(f"   - Columnas: {len(df_clean.columns)}")
+print(f"   - Valores nulos restantes: {df_clean.isnull().sum().sum():,}")
+print(f"   - Memoria utilizada: {df_clean.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
+
+"""* ============================================
+# BLOQUE 6: VISUALIZACIÓN DE RESULTADOS
+* ============================================
+* Verificamos visualmente las transformaciones
+"""
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+plt.style.use('seaborn-v0_8-darkgrid')
+fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+# 1. Distribución de precios
+ax1 = axes[0, 0]
+price_data = df_clean[df_clean['price_clean'] < 100]['price_clean']
+ax1.hist(price_data, bins=50, edgecolor='black', alpha=0.7)
+ax1.set_title('Distribución de Precios (juegos < $100)', fontsize=12)
+ax1.set_xlabel('Precio ($)')
+ax1.set_ylabel('Frecuencia')
+
+# 2. Score de juegos
+ax2 = axes[0, 1]
+if 'game_score_normalized' in df_clean.columns:
+    ax2.hist(df_clean['game_score_normalized'].dropna(), bins=30, edgecolor='black', alpha=0.7, color='green')
+    ax2.set_title('Distribución del Score de Juegos', fontsize=12)
+    ax2.set_xlabel('Score Normalizado (0-100)')
+    ax2.set_ylabel('Frecuencia')
+
+# 3. Lanzamientos por año
+ax3 = axes[1, 0]
+year_counts = df_clean['release_year'].value_counts().sort_index()
+year_counts = year_counts[year_counts.index >= 1990]  # Filtrar años recientes
+ax3.bar(year_counts.index, year_counts.values, alpha=0.7, color='orange')
+ax3.set_title('Lanzamientos por Año', fontsize=12)
+ax3.set_xlabel('Año')
+ax3.set_ylabel('Cantidad de Juegos')
+
+# 4. Top géneros
+ax4 = axes[1, 1]
+if 'genre_count' in df_clean.columns:
+    # Explotar la lista de géneros para contar
+    all_genres = []
+    for genres in df_clean['genre_list'].dropna():
+        all_genres.extend(genres)
+
+    from collections import Counter
+    genre_counts = Counter(all_genres)
+    top_genres = dict(sorted(genre_counts.items(), key=lambda x: x[1], reverse=True)[:10])
+
+    ax4.barh(list(top_genres.keys()), list(top_genres.values()), alpha=0.7, color='purple')
+    ax4.set_title('Top 10 Géneros más Comunes', fontsize=12)
+    ax4.set_xlabel('Cantidad de Juegos')
+
+plt.tight_layout()
+plt.savefig('/content/drive/MyDrive/steam_agents_project/visualizations.png', dpi=150, bbox_inches='tight')
+plt.show()
+
+print("Visualizaciones guardadas")
