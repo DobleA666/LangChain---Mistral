@@ -91,3 +91,238 @@ print(f"Ejemplos: {df_raw['release_date'].dropna().head(10).tolist()}")
 print("\n--- Géneros (genre) ---")
 print(f"Ejemplos: {df_raw['genre'].dropna().head(5)}")
 
+"""* ============================================
+# BLOQUE 3: CLASE NORMALIZADOR - DEFINICIÓN
+* ============================================
+* Definimos la clase completa del Agente 1
+"""
+
+import re
+import json
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from datetime import datetime
+
+class SteamDataNormalizer:
+    """
+    AGENTE 1: Normalizador de datos de Steam
+    Especializado en limpieza, imputación y transformación de datos de videojuegos
+    """
+
+    def __init__(self, df):
+        self.original_df = df.copy()
+        self.clean_df = df.copy()
+        self.encoders = {}
+        self.scalers = {}
+        self.transformations_log = []
+
+    def log_transform(self, message):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_entry = f"[{timestamp}] {message}"
+        self.transformations_log.append(log_entry)
+        print(f"{message}")
+
+    def clean_prices(self):
+        self.log_transform("Iniciando limpieza de precios")
+
+        def extract_price(value):
+            if pd.isna(value):
+                return np.nan
+
+            value_str = str(value).lower().strip()
+
+            # Palabras clave de gratuidad comunes en el dataset
+            free_keywords = ['free', 'free to play', 'play for free', 'demo', 'free to use']
+            if any(kw in value_str for kw in free_keywords):
+                return 0.0
+
+            # Regex mejorada: busca cualquier número decimal o entero
+            price_match = re.search(r'(\d+[\.,]\d{2})|(\d+)', value_str)
+            if price_match:
+                # Reemplazar comas por puntos por si viene en formato europeo (ej: 9,99)
+                price_str = price_match.group(0).replace(',', '.')
+                try:
+                    return float(price_str)
+                except ValueError:
+                    return np.nan
+
+            return np.nan
+
+        self.clean_df['price_clean'] = self.clean_df['original_price'].apply(extract_price)
+
+        if 'discount_price' in self.clean_df.columns:
+            self.clean_df['discount_clean'] = self.clean_df['discount_price'].apply(extract_price)
+            # Si no hay precio de descuento, el precio base es el precio de "descuento"
+            self.clean_df['discount_clean'] = self.clean_df['discount_clean'].fillna(self.clean_df['price_clean'])
+
+            # Calcular porcentaje de descuento real
+            mask = (self.clean_df['discount_clean'] < self.clean_df['price_clean']) & (self.clean_df['price_clean'] > 0)
+            self.clean_df['discount_percent'] = np.where(
+                mask,
+                100 * (1 - self.clean_df['discount_clean'] / self.clean_df['price_clean']),
+                0
+            )
+
+        self.log_transform("Precios limpiados exitosamente")
+        return self
+
+    def process_reviews(self):
+        self.log_transform("Procesando reseñas")
+
+        def parse_review(review_text):
+            if pd.isna(review_text):
+                return {'sentiment': 'No reviews', 'count': 0, 'percentage': 0}
+
+            text = str(review_text)
+
+            # En el dataset de Kaggle el formato suele ser: "Very Positive,(1,234) - 85% of the 1,234 user reviews..."
+            sentiment_match = re.match(r'^([^,\-]+)', text)
+            sentiment = sentiment_match.group(1).strip() if sentiment_match else 'Unknown'
+
+            count_match = re.search(r'\(([\d,]+)\)', text)
+            count = int(count_match.group(1).replace(',', '')) if count_match else 0
+
+            percent_match = re.search(r'(\d+)%', text)
+            percentage = float(percent_match.group(1)) if percent_match else 0
+
+            return {'sentiment': sentiment, 'count': count, 'percentage': percentage}
+
+        for col in ['recent_reviews', 'all_reviews']:
+            if col in self.clean_df.columns:
+                parsed = self.clean_df[col].apply(parse_review)
+                self.clean_df[f'{col}_sentiment'] = parsed.apply(lambda x: x['sentiment'])
+                self.clean_df[f'{col}_count'] = parsed.apply(lambda x: x['count'])
+                self.clean_df[f'{col}_percentage'] = parsed.apply(lambda x: x['percentage'])
+
+        self.log_transform("Reseñas procesadas")
+        return self
+
+    def normalize_dates(self):
+        self.log_transform("Normalizando fechas")
+
+        #errors='coerce' transformará lo que no entienda (ej: "Coming soon") en NaT
+        self.clean_df['release_date_parsed'] = pd.to_datetime(
+            self.clean_df['release_date'],
+            errors='coerce'
+        )
+
+        self.clean_df['release_year'] = self.clean_df['release_date_parsed'].dt.year
+        self.clean_df['release_month'] = self.clean_df['release_date_parsed'].dt.month
+        self.clean_df['release_quarter'] = self.clean_df['release_date_parsed'].dt.quarter
+        self.clean_df['release_dayofweek'] = self.clean_df['release_date_parsed'].dt.dayofweek
+
+        self.clean_df['is_weekend_release'] = (self.clean_df['release_dayofweek'] >= 5).astype(float) # float por si quedan NaNs
+        self.clean_df['is_old_game'] = (self.clean_df['release_year'] < 2010).astype(float)
+
+        self.log_transform("Fechas normalizadas")
+        return self
+
+    def parse_list_column(self, column_name):
+        self.log_transform(f"Procesando columna lista: {column_name}")
+
+        def safe_parse(value):
+            if pd.isna(value):
+                return []
+            # El dataset guarda las listas como strings "Action, Adventure, Casual"
+            # O a veces emulando listas ['Action', 'Adventure']
+            val_str = str(value).strip()
+            if val_str.startswith('[') and val_str.endswith(']'):
+                try:
+                    val_clean = val_str.replace("'", '"')
+                    return json.loads(val_clean)
+                except:
+                    return [x.strip().replace("'", "").replace('"', '') for x in val_str[1:-1].split(',')]
+            else:
+                return [x.strip() for x in val_str.split(',') if x.strip()]
+
+        self.clean_df[f'{column_name}_list'] = self.clean_df[column_name].apply(safe_parse)
+        self.clean_df[f'{column_name}_count'] = self.clean_df[f'{column_name}_list'].apply(len)
+
+        self.log_transform(f"Columna {column_name} procesada")
+        return self
+
+    def impute_missing_values(self):
+        self.log_transform("Imputando valores faltantes")
+
+        text_cols = ['developer', 'publisher', 'recent_reviews_sentiment', 'all_reviews_sentiment']
+        for col in text_cols:
+            if col in self.clean_df.columns:
+                self.clean_df[col] = self.clean_df[col].fillna('Unknown')
+
+        desc_cols = ['desc_snippet', 'about_the_game']
+        for col in desc_cols:
+            if col in self.clean_df.columns:
+                self.clean_df[col] = self.clean_df[col].fillna('')
+
+        # Imputar numéricos con mediana de manera segura
+        numeric_cols = self.clean_df.select_dtypes(include=[np.number]).columns
+        for col in numeric_cols:
+            if self.clean_df[col].isnull().any():
+                median_val = self.clean_df[col].median()
+                # Si toda la columna es NaN, la mediana es NaN, rellenamos con 0
+                self.clean_df[col] = self.clean_df[col].fillna(median_val if not pd.isna(median_val) else 0)
+
+        self.log_transform("Valores faltantes imputados")
+        return self
+
+    def encode_categorical(self, columns_to_encode):
+        self.log_transform(f"Codificando variables categóricas: {columns_to_encode}")
+        for col in columns_to_encode:
+            if col in self.clean_df.columns:
+                encoder = LabelEncoder()
+                self.clean_df[col] = self.clean_df[col].fillna('Unknown').astype(str)
+                self.clean_df[f'{col}_encoded'] = encoder.fit_transform(self.clean_df[col])
+                self.encoders[col] = encoder
+        self.log_transform("Variables categóricas codificadas")
+        return self
+
+    def scale_numeric(self, columns_to_scale):
+        self.log_transform(f"Escalando variables numéricas: {columns_to_scale}")
+        for col in columns_to_scale:
+            if col in self.clean_df.columns:
+                scaler = StandardScaler()
+                # Asegurar que no vayan nulos al scaler
+                self.clean_df[col] = self.clean_df[col].fillna(0)
+                values = self.clean_df[col].values.reshape(-1, 1)
+                self.clean_df[f'{col}_scaled'] = scaler.fit_transform(values)
+                self.scalers[col] = scaler
+        self.log_transform("Variables numéricas escaladas")
+        return self
+
+    def create_target_variable(self):
+        self.log_transform("Creando variable objetivo")
+        if 'all_reviews_percentage' in self.clean_df.columns and 'all_reviews_count' in self.clean_df.columns:
+            # Asegurar nulos a 0 para operaciones aritméticas
+            pct = self.clean_df['all_reviews_percentage'].fillna(0)
+            cnt = self.clean_df['all_reviews_count'].fillna(0)
+
+            self.clean_df['game_score'] = pct * np.log1p(cnt)
+            max_score = self.clean_df['game_score'].max()
+            if max_score > 0:
+                self.clean_df['game_score_normalized'] = 100 * self.clean_df['game_score'] / max_score
+            else:
+                self.clean_df['game_score_normalized'] = 0
+        self.log_transform("Variable objetivo creada")
+        return self
+
+    def get_clean_data(self):
+        return self.clean_df, self.transformations_log
+
+    def save_clean_data(self, path):
+        # Para evitar problemas con PyArrow al guardar listas en Parquet,
+        # convertimos temporalmente las columnas tipo lista a strings de tipo JSON
+        df_to_save = self.clean_df.copy()
+        for col in df_to_save.columns:
+            if col.endswith('_list'):
+                df_to_save[col] = df_to_save[col].apply(json.dumps)
+
+        # Eliminar columna tipo 'datetime64' si da conflicto o dejar que parquet la maneje nativamente
+        df_to_save.to_parquet(path, index=False)
+        self.log_transform(f"Dataset guardado en {path}")
+
+        log_path = path.replace('.parquet', '_transformations.json')
+        with open(log_path, 'w') as f:
+            json.dump(self.transformations_log, f, indent=2)
+        return self
+
