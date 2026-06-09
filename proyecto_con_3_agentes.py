@@ -326,3 +326,67 @@ class SteamDataNormalizer:
             json.dump(self.transformations_log, f, indent=2)
         return self
 
+"""* ============================================
+# BLOQUE 4: EJECUCIÓN DEL AGENTE 1
+* ============================================
+"""
+
+# Crear instancia del normalizador con el dataset original
+normalizer = SteamDataNormalizer(df_raw)
+
+print("="*60)
+print("AGENTE 1: NORMALIZADOR - INICIANDO PROCESAMIENTO")
+print("="*60)
+
+# --- FASE 1: EXTRACCIÓN Y LIMPIEZA INICIAL ---
+# 1. Limpiar precios (maneja texto, gratuidad y convierte a float)
+normalizer.clean_prices()
+
+# 2. Procesar reseñas (extrae sentimiento, conteo y porcentaje por separado)
+normalizer.process_reviews()
+
+# 3. Normalizar fechas (convierte a datetime y extrae características temporales)
+normalizer.normalize_dates()
+
+# 4. Procesar columnas de texto estructurado en listas (géneros, tags, idiomas)
+for col in ['genre', 'popular_tags', 'languages']:
+    if col in normalizer.clean_df.columns:
+        normalizer.parse_list_column(col)
+
+
+# --- FASE 2: TRATAMIENTO DE VALORES FALTANTES ---
+# 5. Imputar valores faltantes de forma inteligente
+# Se ejecuta AQUÍ para capturar los NaNs generados en los pasos anteriores de forma segura
+normalizer.impute_missing_values()
+
+
+# --- FASE 3: PREPARACIÓN PARA MACHINE LEARNING ---
+# 6. Codificar variables categóricas clave (LabelEncoder seguro sin nulos)
+categorical_cols = ['type', 'developer', 'publisher']
+normalizer.encode_categorical(categorical_cols)
+
+# 7. Escalar variables numéricas importantes (StandardScaler)
+numeric_cols = ['price_clean', 'all_reviews_count', 'recent_reviews_count']
+normalizer.scale_numeric([c for c in numeric_cols if c in normalizer.clean_df.columns])
+
+
+# --- FASE 4: INGENIERÍA DE CARACTERÍSTICAS (TARGET) ---
+# 8. Crear variable objetivo basada en popularidad y aceptación
+normalizer.create_target_variable()
+
+print("\n" + "="*60)
+print("AGENTE 1: PROCESAMIENTO COMPLETADO")
+print("="*60)
+
+# Obtener dataframe limpio y bitácora de transformaciones
+df_clean, transformations = normalizer.get_clean_data()
+
+# Reporte de métricas del agente
+print(f"\nDataset limpio dimensiones: {df_clean.shape}")
+print(f"Nuevas columnas creadas: {len(df_clean.columns) - len(df_raw.columns)} nuevas (Total: {len(df_clean.columns)})")
+print(f"Transformaciones registradas en el log: {len(transformations)}")
+
+# Ver muestra del dataset procesado
+print("\nMuestra del dataset limpio:")
+df_clean.head()
+
