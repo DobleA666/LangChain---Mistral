@@ -97,10 +97,12 @@ print(f"Ejemplos: {df_raw['genre'].dropna().head(5)}")
 * Definimos la clase completa del Agente 1
 """
 
+# -*- coding: utf-8 -*-
 import re
 import json
 import numpy as np
 import pandas as pd
+import joblib
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from datetime import datetime
 
@@ -132,15 +134,12 @@ class SteamDataNormalizer:
 
             value_str = str(value).lower().strip()
 
-            # Palabras clave de gratuidad comunes en el dataset
             free_keywords = ['free', 'free to play', 'play for free', 'demo', 'free to use']
             if any(kw in value_str for kw in free_keywords):
                 return 0.0
 
-            # Regex mejorada: busca cualquier número decimal o entero
             price_match = re.search(r'(\d+[\.,]\d{2})|(\d+)', value_str)
             if price_match:
-                # Reemplazar comas por puntos por si viene en formato europeo (ej: 9,99)
                 price_str = price_match.group(0).replace(',', '.')
                 try:
                     return float(price_str)
@@ -153,10 +152,8 @@ class SteamDataNormalizer:
 
         if 'discount_price' in self.clean_df.columns:
             self.clean_df['discount_clean'] = self.clean_df['discount_price'].apply(extract_price)
-            # Si no hay precio de descuento, el precio base es el precio de "descuento"
             self.clean_df['discount_clean'] = self.clean_df['discount_clean'].fillna(self.clean_df['price_clean'])
 
-            # Calcular porcentaje de descuento real
             mask = (self.clean_df['discount_clean'] < self.clean_df['price_clean']) & (self.clean_df['price_clean'] > 0)
             self.clean_df['discount_percent'] = np.where(
                 mask,
@@ -176,7 +173,6 @@ class SteamDataNormalizer:
 
             text = str(review_text)
 
-            # En el dataset de Kaggle el formato suele ser: "Very Positive,(1,234) - 85% of the 1,234 user reviews..."
             sentiment_match = re.match(r'^([^,\-]+)', text)
             sentiment = sentiment_match.group(1).strip() if sentiment_match else 'Unknown'
 
@@ -201,7 +197,6 @@ class SteamDataNormalizer:
     def normalize_dates(self):
         self.log_transform("Normalizando fechas")
 
-        #errors='coerce' transformará lo que no entienda (ej: "Coming soon") en NaT
         self.clean_df['release_date_parsed'] = pd.to_datetime(
             self.clean_df['release_date'],
             errors='coerce'
@@ -212,7 +207,7 @@ class SteamDataNormalizer:
         self.clean_df['release_quarter'] = self.clean_df['release_date_parsed'].dt.quarter
         self.clean_df['release_dayofweek'] = self.clean_df['release_date_parsed'].dt.dayofweek
 
-        self.clean_df['is_weekend_release'] = (self.clean_df['release_dayofweek'] >= 5).astype(float) # float por si quedan NaNs
+        self.clean_df['is_weekend_release'] = (self.clean_df['release_dayofweek'] >= 5).astype(float)
         self.clean_df['is_old_game'] = (self.clean_df['release_year'] < 2010).astype(float)
 
         self.log_transform("Fechas normalizadas")
@@ -224,8 +219,6 @@ class SteamDataNormalizer:
         def safe_parse(value):
             if pd.isna(value):
                 return []
-            # El dataset guarda las listas como strings "Action, Adventure, Casual"
-            # O a veces emulando listas ['Action', 'Adventure']
             val_str = str(value).strip()
             if val_str.startswith('[') and val_str.endswith(']'):
                 try:
@@ -255,12 +248,10 @@ class SteamDataNormalizer:
             if col in self.clean_df.columns:
                 self.clean_df[col] = self.clean_df[col].fillna('')
 
-        # Imputar numéricos con mediana de manera segura
         numeric_cols = self.clean_df.select_dtypes(include=[np.number]).columns
         for col in numeric_cols:
             if self.clean_df[col].isnull().any():
                 median_val = self.clean_df[col].median()
-                # Si toda la columna es NaN, la mediana es NaN, rellenamos con 0
                 self.clean_df[col] = self.clean_df[col].fillna(median_val if not pd.isna(median_val) else 0)
 
         self.log_transform("Valores faltantes imputados")
@@ -282,7 +273,6 @@ class SteamDataNormalizer:
         for col in columns_to_scale:
             if col in self.clean_df.columns:
                 scaler = StandardScaler()
-                # Asegurar que no vayan nulos al scaler
                 self.clean_df[col] = self.clean_df[col].fillna(0)
                 values = self.clean_df[col].values.reshape(-1, 1)
                 self.clean_df[f'{col}_scaled'] = scaler.fit_transform(values)
@@ -293,7 +283,6 @@ class SteamDataNormalizer:
     def create_target_variable(self):
         self.log_transform("Creando variable objetivo")
         if 'all_reviews_percentage' in self.clean_df.columns and 'all_reviews_count' in self.clean_df.columns:
-            # Asegurar nulos a 0 para operaciones aritméticas
             pct = self.clean_df['all_reviews_percentage'].fillna(0)
             cnt = self.clean_df['all_reviews_count'].fillna(0)
 
@@ -310,14 +299,11 @@ class SteamDataNormalizer:
         return self.clean_df, self.transformations_log
 
     def save_clean_data(self, path):
-        # Para evitar problemas con PyArrow al guardar listas en Parquet,
-        # convertimos temporalmente las columnas tipo lista a strings de tipo JSON
         df_to_save = self.clean_df.copy()
         for col in df_to_save.columns:
             if col.endswith('_list'):
                 df_to_save[col] = df_to_save[col].apply(json.dumps)
 
-        # Eliminar columna tipo 'datetime64' si da conflicto o dejar que parquet la maneje nativamente
         df_to_save.to_parquet(path, index=False)
         self.log_transform(f"Dataset guardado en {path}")
 
@@ -326,16 +312,98 @@ class SteamDataNormalizer:
             json.dump(self.transformations_log, f, indent=2)
         return self
 
+
+# ============================================================================
+# SUB-CLASE OPTIMIZADA: PERSISTENCIA, CALIDAD Y DESCARTE DE RAM PROTEGIDO
+# ============================================================================
+
+class SteamDataNormalizerOptimized(SteamDataNormalizer):
+    """
+    Versión profesional del Agente 1 que añade capacidades de persistencia
+    para el Agente 2 y validación estructurada para el Agente 3.
+    """
+
+    def __init__(self, df):
+        super().__init__(df)
+        self.quality_metrics = {}
+        self.param_path = None
+
+    def save_parameters(self, path):
+        """Guarda los transformadores entrenados para que los use el Agente 2"""
+        params = {
+            'scalers': self.scalers,
+            'encoders': self.encoders,
+            'transformations_log': self.transformations_log,
+            'final_columns': list(self.clean_df.columns),
+            'quality_metrics': self.quality_metrics
+        }
+        joblib.dump(params, path)
+        self.param_path = path
+        self.log_transform(f"Parámetros e inspectores guardados con éxito en: {path}")
+        return self
+
+    def validate_quality(self):
+        """Construye un diagnóstico de calidad para el reporte del Agente 3 sin romper con columnas de tipo lista"""
+        self.log_transform("Ejecutando auditoría de calidad sobre datos limpios")
+
+        # FIX: Filtrar variables tipo lista para calcular duplicados de forma segura
+        cols_para_duplicados = [c for c in self.clean_df.columns if not c.endswith('_list')]
+
+        metrics = {
+            'total_registros': len(self.clean_df),
+            'total_columnas': len(self.clean_df.columns),
+            'nulos_totales': int(self.clean_df.isnull().sum().sum()),
+            'duplicados_totales': int(self.clean_df.duplicated(subset=cols_para_duplicados).sum()),
+            'uso_memoria_mb': self.clean_df.memory_usage(deep=True).sum() / 1024**2
+        }
+
+        if 'game_score_normalized' in self.clean_df.columns:
+            metrics['rango_score_target'] = [
+                float(self.clean_df['game_score_normalized'].min()),
+                float(self.clean_df['game_score_normalized'].max())
+            ]
+        if 'price_clean' in self.clean_df.columns:
+            metrics['precios_negativos'] = int((self.clean_df['price_clean'] < 0).sum())
+
+        self.quality_metrics = metrics
+        self.log_transform(f"Auditoría terminada. Nulos huérfanos: {metrics['nulos_totales']}")
+        return metrics
+
+    def remove_intermediate_columns(self, keep_cols=None):
+        """Elimina las columnas intermedias temporales para optimizar consumo en memoria"""
+        if keep_cols is None:
+            keep_cols = [
+                'price_clean', 'discount_percent', 'release_year', 'release_month',
+                'is_weekend_release', 'is_old_game', 'genre_count', 'popular_tags_count',
+                'all_reviews_count', 'recent_reviews_count', 'all_reviews_percentage',
+                'game_score_normalized', 'type_encoded', 'developer_encoded', 'publisher_encoded',
+                'price_clean_scaled', 'all_reviews_count_scaled', 'recent_reviews_count_scaled'
+            ]
+
+        id_cols = ['name', 'app_name', 'url']
+        for col in id_cols:
+            if col in self.clean_df.columns:
+                keep_cols.append(col)
+
+        list_cols = [c for c in self.clean_df.columns if c.endswith('_list')]
+        keep_cols.extend(list_cols)
+
+        existentes = [c for c in keep_cols if c in self.clean_df.columns]
+        self.clean_df = self.clean_df[existentes]
+
+        self.log_transform(f"Limpieza de RAM: Columnas reducidas a {len(existentes)} variables esenciales.")
+        return self
+
 """* ============================================
 # BLOQUE 4: EJECUCIÓN DEL AGENTE 1
 * ============================================
 """
 
-# Crear instancia del normalizador con el dataset original
-normalizer = SteamDataNormalizer(df_raw)
+# Crear instancia del normalizador optimizado con el dataset original
+normalizer = SteamDataNormalizerOptimized(df_raw)
 
 print("="*60)
-print("AGENTE 1: NORMALIZADOR - INICIANDO PROCESAMIENTO")
+print("AGENTE 1 OPTIMIZADO: INICIANDO PIPELINE DE PRODUCCIÓN")
 print("="*60)
 
 # --- FASE 1: EXTRACCIÓN Y LIMPIEZA INICIAL ---
@@ -356,7 +424,6 @@ for col in ['genre', 'popular_tags', 'languages']:
 
 # --- FASE 2: TRATAMIENTO DE VALORES FALTANTES ---
 # 5. Imputar valores faltantes de forma inteligente
-# Se ejecuta AQUÍ para capturar los NaNs generados en los pasos anteriores de forma segura
 normalizer.impute_missing_values()
 
 
@@ -374,20 +441,43 @@ normalizer.scale_numeric([c for c in numeric_cols if c in normalizer.clean_df.co
 # 8. Crear variable objetivo basada en popularidad y aceptación
 normalizer.create_target_variable()
 
+
+# ============================================================
+# 🔥 NUEVA FASE: OPTIMIZACIÓN, AUDITORÍA Y PERSISTENCIA
+# ============================================================
+
+# 9. Eliminar columnas intermedias para liberar espacio en RAM
+normalizer.remove_intermediate_columns()
+
+# 10. Ejecutar auditoría de calidad de datos
+metrics = normalizer.validate_quality()
+
+# 11. Guardar parámetros (scalers/encoders) para uso del Agente 2
+normalizer.save_parameters('/content/drive/MyDrive/steam_agents_project/agent1_params.joblib')
+
+
+# ============================================================
+# OUTPUT Y REPORTES FINALES
+# ============================================================
 print("\n" + "="*60)
-print("AGENTE 1: PROCESAMIENTO COMPLETADO")
+print("AGENTE 1: PIPELINE DE PRODUCCIÓN COMPLETADO")
 print("="*60)
 
-# Obtener dataframe limpio y bitácora de transformaciones
+# Obtener dataframe limpio y optimizado junto a la bitácora
 df_clean, transformations = normalizer.get_clean_data()
 
-# Reporte de métricas del agente
+# Reporte de métricas de rendimiento y calidad del agente
 print(f"\nDataset limpio dimensiones: {df_clean.shape}")
-print(f"Nuevas columnas creadas: {len(df_clean.columns) - len(df_raw.columns)} nuevas (Total: {len(df_clean.columns)})")
+print(f"Nuevas columnas finales: {len(df_clean.columns) - len(df_raw.columns)} respecto al original")
 print(f"Transformaciones registradas en el log: {len(transformations)}")
 
+print("\nResumen de Auditoría de Calidad:")
+print(f"   → Valores nulos remanentes en el dataset: {metrics['nulos_totales']}")
+print(f"   → Filas duplicadas detectadas: {metrics['duplicados_totales']}")
+print(f"   → Consumo de RAM estimado del DataFrame: {metrics['uso_memoria_mb']:.2f} MB")
+
 # Ver muestra del dataset procesado
-print("\nMuestra del dataset limpio:")
+print("\nMuestra del dataset limpio final:")
 df_clean.head()
 
 """* ============================================
