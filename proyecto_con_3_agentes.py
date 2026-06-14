@@ -565,3 +565,280 @@ plt.savefig('/content/drive/MyDrive/steam_agents_project/visualizations.png', dp
 plt.show()
 
 print("Visualizaciones guardadas")
+
+
+"""============================================
+# BLOQUE 7: AGENTE 2 - ENTRENADOR DE MODELOS
+============================================
+* Responsabilidad: Validación, entrenamiento y selección del mejor modelo
+"""
+
+import joblib
+import pandas as pd
+import numpy as np
+import json
+from sklearn.model_selection import train_test_split, cross_val_score, KFold, GridSearchCV
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.linear_model import Ridge, Lasso
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import warnings
+warnings.filterwarnings('ignore')
+
+class AgenteEntrenador:
+    """
+    AGENTE 2: Entrenador de modelos de Machine Learning
+    Especializado en validación, entrenamiento y selección de modelos
+    """
+
+    def __init__(self, clean_data_path, params_path):
+        """
+        Inicializa el agente cargando el dataset limpio y los parámetros del Agente 1
+        """
+        print("="*60)
+        print("AGENTE 2: INICIANDO ENTRENADOR")
+        print("="*60)
+
+        # Cargar dataset limpio
+        self.df = pd.read_parquet(clean_data_path)
+        print(f"Dataset cargado: {self.df.shape[0]} filas × {self.df.shape[1]} columnas")
+
+        # Cargar parámetros del Agente 1 (Scalers, Encoders, Logs)
+        self.params = joblib.load(params_path)
+        print(f"Parámetros del Agente 1 cargados con éxito")
+
+        # Inicializar atributos
+        self.X_train = None
+        self.X_test = None
+        self.y_train = None
+        self.y_test = None
+        self.models = {}
+        self.results = {}
+        self.best_model = None
+        self.best_model_name = None
+        self.best_metrics = {}
+
+    def prepare_features(self, target_col='game_score_normalized', test_size=0.2, random_state=42):
+        """
+        Prepara las características (X) y el target (y) evitando colinealidad y fugas de datos
+        """
+        print("\n" + "-"*40)
+        print("PREPARANDO CARACTERÍSTICAS PARA ENTRAR A LOS MODELOS")
+        print("-"*40)
+
+        if target_col not in self.df.columns:
+            raise ValueError(f"Columna objetivo '{target_col}' no encontrada en el dataset")
+
+        # 1. EXCLUSIÓN ESTRICTA: Evitamos meter la variable original si ya usamos la versión escalada (_scaled)
+        # También dejamos fuera identificadores, textos descriptivos y estructuras de listas.
+        exclude_cols = [
+            target_col, 'game_score', 'name', 'app_name', 'url', 'desc_snippet', 'about_the_game',
+            'developer', 'publisher', 'type', 'all_reviews', 'recent_reviews',
+            # Dejar fuera las originales si existen sus versiones escaladas en el dataset
+            'price_clean', 'all_reviews_count', 'recent_reviews_count'
+        ]
+
+        # Filtrar nombres de columnas que no estén en la lista de exclusión y que no sean listas descriptivas
+        feature_cols = [col for col in self.df.columns if col not in exclude_cols and not col.endswith('_list')]
+
+        # Filtrar estrictamente solo columnas numéricas remanentes
+        X = self.df[feature_cols].select_dtypes(include=[np.number])
+        y = self.df[target_col]
+
+        # Eliminar filas donde el target sea nulo de manera huérfana
+        mask = ~y.isnull()
+        X = X[mask]
+        y = y[mask]
+
+        # Dividir conjuntos de datos
+        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
+            X, y, test_size=test_size, random_state=random_state
+        )
+
+        print(f"Matriz de características X: {X.shape[1]} columnas seleccionadas.")
+        print(f"   → Variables predictoras finales: {list(X.columns)}")
+        print(f"División completada: Train = {len(self.X_train)} | Test = {len(self.X_test)}")
+
+        return self
+
+    def train_models(self):
+        """
+        Entrenamientos en paralelo de los modelos candidatos y validación cruzada robusta
+        """
+        print("\n" + "-"*40)
+        print("EVALUANDO CANDIDATOS EN ARENA DE ENTRENAMIENTO")
+        print("-"*40)
+
+        models_to_train = {
+            'Random Forest': RandomForestRegressor(n_estimators=100, max_depth=15, random_state=42, n_jobs=-1),
+            'Gradient Boosting': GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=5, random_state=42),
+            'Ridge Regression': Ridge(alpha=1.0),
+            'Lasso Regression': Lasso(alpha=0.01)
+        }
+
+        cv = KFold(n_splits=5, shuffle=True, random_state=42)
+
+        for name, model in models_to_train.items():
+            print(f"Procesando {name}...")
+
+            # Ajustar modelo
+            model.fit(self.X_train, self.y_train)
+
+            y_pred_train = model.predict(self.X_train)
+            y_pred_test = model.predict(self.X_test)
+
+            # Extracción de métricas estándar de regresión
+            metrics = {
+                'train_r2': float(r2_score(self.y_train, y_pred_train)),
+                'test_r2': float(r2_score(self.y_test, y_pred_test)),
+                'train_rmse': float(np.sqrt(mean_squared_error(self.y_train, y_pred_train))),
+                'test_rmse': float(np.sqrt(mean_squared_error(self.y_test, y_pred_test))),
+                'train_mae': float(mean_absolute_error(self.y_train, y_pred_train)),
+                'test_mae': float(mean_absolute_error(self.y_test, y_pred_test))
+            }
+
+            # Validación Cruzada
+            try:
+                cv_scores = cross_val_score(model, self.X_train, self.y_train, cv=cv, scoring='r2', n_jobs=-1)
+                metrics['cv_r2_mean'] = float(cv_scores.mean())
+                metrics['cv_r2_std'] = float(cv_scores.std())
+            except Exception as e:
+                metrics['cv_r2_mean'] = 0.0
+                metrics['cv_r2_std'] = 0.0
+
+            self.models[name] = model
+            self.results[name] = metrics
+
+            print(f"   → R² Test: {metrics['test_r2']:.4f} | CV R² Mean: {metrics['cv_r2_mean']:.4f} | RMSE: {metrics['test_rmse']:.4f}")
+
+        return self
+
+    def select_best_model(self, metric='test_r2'):
+        """
+        Selecciona el algoritmo ganador basándose en la métrica competitiva elegida
+        """
+        print("\n" + "-"*40)
+        print("SELECCIONANDO EL MODELO GANADOR")
+        print("-"*40)
+
+        higher_is_better = metric in ['test_r2', 'cv_r2_mean', 'train_r2']
+        best_score = -np.inf if higher_is_better else np.inf
+        best_name = None
+
+        for name, metrics in self.results.items():
+            score = metrics.get(metric, -np.inf if higher_is_better else np.inf)
+            if higher_is_better and score > best_score:
+                best_score = score
+                best_name = name
+            elif not higher_is_better and score < best_score:
+                best_score = score
+                best_name = name
+
+        self.best_model_name = best_name
+        self.best_model = self.models[best_name]
+        self.best_metrics = self.results[best_name]
+
+        print(f"¡Modelo Ganador seleccionado!: {best_name}")
+        print(f"Desempeño bajo métrica '{metric}': {best_score:.4f}")
+        return self
+
+    def hyperparameter_tuning(self):
+        """
+        Ajuste fino opcional por Grid Search para exprimir el rendimiento del ganador
+        """
+        print("\n" + "-"*40)
+        print(f"OPTIMIZANDO HIPERPARÁMETROS: {self.best_model_name}")
+        print("-"*40)
+
+        if self.best_model_name == 'Random Forest':
+            param_grid = {
+                'n_estimators': [100, 150],
+                'max_depth': [12, 15, None],
+                'min_samples_split': [2, 5]
+            }
+            base_model = RandomForestRegressor(random_state=42, n_jobs=-1)
+        elif self.best_model_name == 'Gradient Boosting':
+            param_grid = {
+                'n_estimators': [100, 150],
+                'learning_rate': [0.05, 0.1],
+                'max_depth': [4, 5]
+            }
+            base_model = GradientBoostingRegressor(random_state=42)
+        else:
+            print(f"El tuning no es crítico o no está configurado para {self.best_model_name}.")
+            return self
+
+        grid = GridSearchCV(base_model, param_grid, cv=3, scoring='r2', n_jobs=-1)
+        grid.fit(self.X_train, self.y_train)
+
+        print(f"   → Mejores parámetros: {grid.best_params_}")
+        print(f"   → R² optimizado en CV: {grid.best_score_:.4f}")
+
+        self.best_model = grid.best_estimator_
+        self.best_metrics['cv_r2_mean'] = float(grid.best_score_)
+        return self
+
+    def save_model(self, path):
+        """
+        Empaqueta el modelo entrenado y exporta un JSON limpio de métricas para el Agente 3
+        """
+        model_package = {
+            'model': self.best_model,
+            'model_name': self.best_model_name,
+            'metrics': self.best_metrics,
+            'features': list(self.X_train.columns),
+            'train_size': len(self.X_train),
+            'test_size': len(self.X_test),
+            'results_summary': self.results
+        }
+
+        # Guardar binario del modelo
+        joblib.dump(model_package, path)
+        print(f"\nBinario del modelo guardado en: {path}")
+
+        # Guardar JSON de métricas para el Agente Supervisor (Agente 3)
+        metrics_path = path.replace('.joblib', '_metrics.json')
+        with open(metrics_path, 'w') as f:
+            json.dump(self.best_metrics, f, indent=2)
+
+        print(f"Reporte JSON de métricas exportado en: {metrics_path}")
+        return self
+
+"""============================================
+# BLOQUE 8: EJECUCIÓN CONTINUA DEL PIPELINE DEL AGENTE 2
+============================================
+"""
+
+# 1. Instanciar el Agente Entrenador cargando las salidas previas
+entrenador = AgenteEntrenador(
+    clean_data_path='/content/drive/MyDrive/steam_agents_project/steam_games_clean.parquet',
+    params_path='/content/drive/MyDrive/steam_agents_project/agent1_params.joblib'
+)
+
+# 2. Segmentar variables predictoras evitando redundancia numérica
+entrenador.prepare_features(target_col='game_score_normalized', test_size=0.2, random_state=42)
+
+# 3. Lanzar entrenamiento simultáneo de modelos competidores
+entrenador.train_models()
+
+# 4. Seleccionar el algoritmo con mejor coeficiente de determinación R²
+entrenador.select_best_model(metric='test_r2')
+
+# 5. Opcional: Descomentar la siguiente línea para activar optimización por grilla
+# entrenador.hyperparameter_tuning()
+
+# 6. Serializar artefactos finales para el Agente Comunicador
+entrenador.save_model('/content/drive/MyDrive/steam_agents_project/best_model.joblib')
+
+# 7. Desplegar Feature Importance si el modelo ganador lo soporta (Modelos basados en Árboles)
+if hasattr(entrenador.best_model, 'feature_importances_'):
+    print("\nTOP 10 VARIABLES CON MAYOR PESO PREDICTOR (FEATURE IMPORTANCE):")
+    importances = entrenador.best_model.feature_importances_
+    features = entrenador.X_train.columns
+    fi_df = pd.DataFrame({'feature': features, 'importance': importances}).sort_values('importance', ascending=False).head(10)
+
+    for idx, row in fi_df.iterrows():
+        print(f"   → Variable: {row['feature']:<30} | Impacto: {row['importance']:.4f}")
+
+print("\n" + "="*60)
+print("PIPELINE DEL AGENTE 2 CONCLUIDO CON ÉXITO")
+print("="*60)
