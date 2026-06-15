@@ -876,7 +876,7 @@ def rate_limit(max_calls_per_minute=45):
 
 class AgenteComunicadorGratuito:
     """
-    Agente 3 con Gemini - Versión optimizada para entrega académica y reportes automatizados
+    Agente 3 con Gemini
     """
 
     def __init__(self, clean_data_path, params_path, model_path, api_key, output_dir='/content/drive/MyDrive/steam_agents_project'):
@@ -1070,7 +1070,7 @@ class AgenteComunicadorGratuito:
             drive_service.permissions().create(fileId=file_id, body={'type': 'anyone', 'role': 'reader'}).execute()
             return f"https://docs.google.com/document/d/{file_id}/edit?usp=sharing"
         except Exception as e:
-            return f"⚠️ Archivo persistido localmente en Drive, pero falló la exportación a la nube: {str(e)}"
+            return f"Archivo persistido localmente en Drive, pero falló la exportación a la nube: {str(e)}"
 
     def menu(self):
         """Consola conversacional y comandos de control"""
