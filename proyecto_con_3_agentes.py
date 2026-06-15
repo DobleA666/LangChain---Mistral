@@ -14,6 +14,7 @@ Original file is located at
 """
 
 !pip install pandas numpy scikit-learn matplotlib seaborn wordcloud openpyxl
+!pip install -U google-generativeai
 
 # Montar Google Drive para guardar los resultados
 from google.colab import drive
@@ -22,11 +23,20 @@ drive.mount('/content/drive')
 # Crear carpeta para el proyecto
 !mkdir -p /content/drive/MyDrive/steam_agents_project
 
+import json
+import joblib
+import hashlib
+import os
+import time
+import re
+from functools import wraps
+from datetime import datetime
 import pandas as pd
 import numpy as np
-import re
-import json
-from datetime import datetime
+
+from google.colab import userdata
+API_KEY = userdata.get('GEMINI_API_KEY')
+
 
 print("Entorno configurado correctamente")
 print(f"Sesión iniciada: {datetime.now()}")
@@ -443,7 +453,7 @@ normalizer.create_target_variable()
 
 
 # ============================================================
-# 🔥 NUEVA FASE: OPTIMIZACIÓN, AUDITORÍA Y PERSISTENCIA
+# NUEVA FASE: OPTIMIZACIÓN, AUDITORÍA Y PERSISTENCIA
 # ============================================================
 
 # 9. Eliminar columnas intermedias para liberar espacio en RAM
@@ -565,7 +575,6 @@ plt.savefig('/content/drive/MyDrive/steam_agents_project/visualizations.png', dp
 plt.show()
 
 print("Visualizaciones guardadas")
-
 
 """============================================
 # BLOQUE 7: AGENTE 2 - ENTRENADOR DE MODELOS
@@ -842,3 +851,294 @@ if hasattr(entrenador.best_model, 'feature_importances_'):
 print("\n" + "="*60)
 print("PIPELINE DEL AGENTE 2 CONCLUIDO CON ÉXITO")
 print("="*60)
+
+"""============================================
+# BLOQUE 9: ARQUITECTURA DEL AGENTE 3
+============================================
+"""
+
+def rate_limit(max_calls_per_minute=45):
+    """Decorador para respetar cuotas de API gratuita y evitar bloqueos por Rate Limit"""
+    def decorator(func):
+        calls = []
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            now = time.time()
+            calls[:] = [c for c in calls if now - c < 60]
+            if len(calls) >= max_calls_per_minute:
+                wait = 60 - (now - calls[0]) + 1
+                print(f"\n⏳ Límite de API alcanzado. Esperando {wait:.0f} segundos...")
+                time.sleep(wait)
+            calls.append(now)
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+class AgenteComunicadorGratuito:
+    """
+    Agente 3 con Gemini - Versión optimizada para entrega académica y reportes automatizados
+    """
+
+    def __init__(self, clean_data_path, params_path, model_path, api_key, output_dir='/content/drive/MyDrive/steam_agents_project'):
+        print("="*60)
+        print("AGENTE 3 - COMUNICADOR INTELIGENTE (GEMINI FREE)")
+        print("="*60)
+
+        self.output_dir = output_dir
+        import google.generativeai as genai
+
+        # Configurar de forma nativa la API con el modelo estable gratuito de última generación
+        genai.configure(api_key=api_key)
+        self.model = genai.GenerativeModel('gemini-2.5-flash')
+
+        # Carga del estado y binarios de agentes previos
+        self.df = pd.read_parquet(clean_data_path)
+        self.params = joblib.load(params_path)
+        model_package = joblib.load(model_path)
+        self.best_model = model_package['model']
+        self.best_model_name = model_package['model_name']
+        self.features_used = model_package['features']
+
+        self.historial = []
+        self._cache = {}
+
+        print(f"{self.df.shape[0]:,} juegos cargados con éxito | {self.df.shape[1]} features")
+        print(f"Modelo predictivo acoplado: {self.best_model_name}")
+        print(f"Motor LLM activo: Gemini 2.5 Flash Tier Gratuito")
+
+    def _es_codigo_seguro(self, codigo):
+        """Validación estricta de seguridad del código generado en tiempo de ejecución"""
+        peligrosas = ['__import__', 'eval', 'exec', 'open', 'system', 'subprocess',
+                      'os.', 'shutil', '__builtins__', 'globals', 'locals']
+        codigo_lower = codigo.lower()
+        for p in peligrosas:
+            if p in codigo_lower:
+                return False, f"Operación no permitida: {p}"
+        if 'self.df' not in codigo:
+            return False, "El código debe operar sobre self.df"
+        return True, "OK"
+
+    def _parse_json_response(self, text):
+        """Sanitiza y extrae la estructura JSON limpia devuelta por el LLM"""
+        text = text.strip()
+        if text.startswith('```json'):
+            text = text[7:]
+        elif text.startswith('```'):
+            text = text[3:]
+        if text.endswith('```'):
+            text = text[:-3]
+
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            return match.group(0)
+        return text
+
+    @rate_limit(max_calls_per_minute=45)
+    def consultar_corpus(self, pregunta_usuario):
+        """Traducción de lenguaje natural a consultas estructuradas de Pandas mediante Inferencia"""
+        pregunta_hash = hashlib.md5(pregunta_usuario.strip().lower().encode()).hexdigest()
+        if pregunta_hash in self._cache:
+            return f"{self._cache[pregunta_hash]} ⚡ (desde caché)"
+
+        columnas = list(self.df.columns)
+        prompt = f"""
+        Eres analista de datos experto. Trabajas con un DataFrame `self.df` con columnas: {columnas}
+
+        Reglas absolutas:
+        1. Responde EXCLUSIVAMENTE con un JSON con la estructura: {{"codigo": "código pandas ejecutable", "explicacion": "qué hace"}}
+        2. Si la pregunta NO se puede responder con las columnas disponibles, pon la palabra "NO_DISPONIBLE" en el campo codigo.
+        3. No inventes columnas bajo ninguna circunstancia.
+
+        Pregunta: {pregunta_usuario}
+        """
+
+        try:
+            response = self.model.generate_content(prompt, generation_config={"temperature": 0.0})
+            json_text = self._parse_json_response(response.text)
+            respuesta_json = json.loads(json_text)
+
+            codigo = respuesta_json.get("codigo", "")
+            if "NO_DISPONIBLE" in codigo:
+                return "Esa información no está disponible en el dataset de Steam."
+
+            es_seguro, msg = self._es_codigo_seguro(codigo)
+            if not es_seguro:
+                return f"Consulta rechazada por políticas de sandbox: {msg}"
+
+            # Ejecución dinámica y extracción del puntero de datos
+            local_vars = {'self': self, 'resultado': None, 'pd': pd, 'np': np}
+            exec(f"resultado = {codigo}", local_vars, local_vars)
+            resultado = local_vars['resultado']
+
+            if isinstance(resultado, pd.DataFrame):
+                resultado_str = resultado.head(10).to_markdown()
+                if len(resultado) > 10:
+                    resultado_str += f"\n\n*Mostrando 10 de {len(resultado)} filas*"
+            elif isinstance(resultado, pd.Series):
+                resultado_str = resultado.to_string()
+            else:
+                resultado_str = str(resultado)
+
+            # Síntesis final en lenguaje corporativo legible
+            prompt_final = f"Actúa como un comunicador ejecutivo. Traduce este resultado analítico a una respuesta fluida, formal y clara en español para responder la pregunta del usuario.\nPregunta: {pregunta_usuario}\nResultado crudo: {resultado_str}"
+            response_final = self.model.generate_content(prompt_final, generation_config={"temperature": 0.2})
+            respuesta = response_final.text.strip()
+
+            self._cache[pregunta_hash] = respuesta
+            self.historial.append({
+                'pregunta': pregunta_usuario,
+                'respuesta': respuesta,
+                'codigo_generado': codigo,
+                'timestamp': datetime.now().isoformat()
+            })
+
+            return respuesta
+
+        except Exception as e:
+            return f"No pude procesar la consulta analítica: {str(e)[:120]}"
+
+    def generar_reporte_drive(self):
+        """Compila métricas clave e interacciones para subirlas como un Google Doc público"""
+        print("Generando reporte analítico avanzado y vinculando con Google Drive...")
+
+        from google.colab import auth
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaFileUpload
+        import logging
+
+        try:
+            logging.getLogger('google_auth_httplib2').setLevel(logging.ERROR)
+            auth.authenticate_user()
+            drive_service = build('drive', 'v3')
+        except Exception as e:
+            return f"Falló la validación OAuth de Google: {str(e)}"
+
+        fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        total_juegos = len(self.df)
+        precio_medio = self.df['price_clean'].mean() if 'price_clean' in self.df.columns else 0
+        score_medio = self.df['game_score_normalized'].mean() if 'game_score_normalized' in self.df.columns else 0
+
+        try:
+            res_intro = self.model.generate_content("Escribe un párrafo ejecutivo introductorio en español analizando la relevancia de auditar catálogos masivos de software mediante Inteligencia Artificial y Machine Learning.")
+            introduccion_ia = res_intro.text.strip()
+        except:
+            introduccion_ia = "Auditoría automatizada del estado de ingesta e integridad del corpus."
+
+        reporte_md = f"""# INFORME EJECUTIVO DE AUDITORÍA DE DATOS - STEAM
+**Generado por:** Ecosistema Multi-Agente (Agente 3 Comunicador)
+**Fecha de emisión:** {fecha_actual}
+
+---
+
+## 1. Resumen Ejecutivo
+{introduccion_ia}
+
+## 2. Métricas de Datos Consolidadas
+* **Volumen del Catálogo:** {total_juegos:,} videojuegos analizados.
+* **Valor Promedio de Mercado:** ${precio_medio:.2f} USD.
+* **Calidad Promedio Histórica (Score):** {score_medio:.1f} / 100 puntos.
+* **Modelo Asociado de Inferencia (Agente 2):** `{self.best_model_name}`
+* **Características Técnicas Evaluadas (Features):** {', '.join(self.features_used)}
+
+## 3. Logs Analíticos de la Sesión Actual
+"""
+        if not self.historial:
+            reporte_md += "\n*No se registraron consultas directas en esta sesión de terminal.*\n"
+        else:
+            for i, h in enumerate(self.historial):
+                reporte_md += f"\n### Interacción #{i+1}\n"
+                reporte_md += f"* **Input Operador:** *\"{h['pregunta']}\"*\n"
+                reporte_md += f"* **Output Agente:** {h['respuesta']}\n"
+                reporte_md += f"  ---\n"
+
+        reporte_md += "\n---\n*Reporte compilado de forma íntegra.*"
+
+        os.makedirs(self.output_dir, exist_ok=True)
+        local_path = f"{self.output_dir}/Reporte_Ejecutivo_Steam.md"
+        with open(local_path, 'w', encoding='utf-8') as f:
+            f.write(reporte_md)
+
+        try:
+            file_metadata = {
+                'name': f"Reporte Ejecutivo Steam - {datetime.now().strftime('%d-%m')}",
+                'mimeType': 'application/vnd.google-apps.document'
+            }
+            media = MediaFileUpload(local_path, mimetype='text/markdown', resumable=True)
+            uploaded_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+            file_id = uploaded_file.get('id')
+
+            drive_service.permissions().create(fileId=file_id, body={'type': 'anyone', 'role': 'reader'}).execute()
+            return f"https://docs.google.com/document/d/{file_id}/edit?usp=sharing"
+        except Exception as e:
+            return f"⚠️ Archivo persistido localmente en Drive, pero falló la exportación a la nube: {str(e)}"
+
+    def menu(self):
+        """Consola conversacional y comandos de control"""
+        print("\n" + "="*60)
+        print("ASISTENTE INTELIGENTE - PREGUNTA SOBRE STEAM")
+        print("="*60)
+        print("\n Comandos especiales válidos: /stats | /history | /report | /exit")
+
+        while True:
+            consulta = input("\n👤 Pregunta: ").strip()
+            if not consulta:
+                continue
+
+            if consulta.lower() == '/exit':
+                print("\n ¡Hasta luego! Guardando trazas...")
+                if self.historial:
+                    os.makedirs(self.output_dir, exist_ok=True)
+                    with open(f"{self.output_dir}/historial.json", 'w', encoding='utf-8') as f:
+                        json.dump(self.historial, f, indent=2, ensure_ascii=False)
+                    print(" Log de interacciones respaldado con éxito en Drive.")
+                break
+
+            elif consulta.lower() == '/stats':
+                print(f"\nRESUMEN ACTUAL DEL INVENTARIO:")
+                print(f"   → Registros cargados: {self.df.shape[0]:,} videojuegos.")
+                print(f"   → Calidad media general: {self.df['game_score_normalized'].mean():.1f}/100")
+                continue
+
+            elif consulta.lower() == '/history':
+                if not self.historial:
+                    print("\nNo hay interacciones en la memoria temporal.")
+                else:
+                    print(f"\nHistorial Reciente (Últimas {min(3, len(self.historial))} consultas):")
+                    for h in self.historial[-3:]:
+                        print(f"   • [{h['timestamp'][11:19]}] Q: '{h['pregunta'][:40]}...'")
+                continue
+
+            elif consulta.lower() == '/report':
+                enlace = self.generar_reporte_drive()
+                print("\n" + "="*60)
+                if "https://" in enlace:
+                    print("DOCUMENTO GENERADO CON ÉXITO")
+                    print("Accedé a tu informe corporativo desde el siguiente enlace:")
+                    print(f"\n{enlace}\n")
+                else:
+                    print(enlace)
+                print("="*60)
+                continue
+
+            print("Procesando...", end="", flush=True)
+            respuesta = self.consultar_corpus(consulta)
+            print("\r" + " " * 15 + "\r", end="")
+            print(f"\n{respuesta}")
+
+print("Clase 'AgenteComunicadorGratuito' cargada en memoria. Lista para ser instanciada.")
+
+"""============================================
+# BLOQUE 10: INSTANCIACIÓN Y EJECUCIÓN
+============================================
+"""
+
+# Instanciamos el modelo asignándole las rutas de los entregables del bloque 1 y 2
+agente = AgenteComunicadorGratuito(
+    clean_data_path='/content/drive/MyDrive/steam_agents_project/steam_games_clean.parquet',
+    params_path='/content/drive/MyDrive/steam_agents_project/agent1_params.joblib',
+    model_path='/content/drive/MyDrive/steam_agents_project/best_model.joblib',
+    api_key=API_KEY
+)
+
+# Lanzar el bucle de terminal conversacional
+agente.menu()
